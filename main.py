@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 
 import data
 import model 
+import util 
 
 argparser = ArgumentParser()
 argparser.add_argument('--numEpoch',type=int, default=10)
@@ -17,6 +18,7 @@ argparser.add_argument('--cuda',action='store_true')
 argparser.add_argument('--samplePrediction',action='store_true')
 argparser.add_argument('--debug',action='store_true')
 argparser.add_argument('--reprocess',action='store_true',help='process whole data again')
+argparser.add_argument('--validEvery',type=int, default = 200000, help='perform validation and anneal learning rate every given iterations')
 
 args = argparser.parse_args()
 
@@ -29,6 +31,9 @@ device = torch.device('cuda' if args.cuda else 'cpu')
 
 
 def train(dataSource,args):
+    global model_
+    global hidden 
+    global lr
     #data load
     trainF,trainT = dataSource
     # target mean for R2 score
@@ -45,6 +50,8 @@ def train(dataSource,args):
                 torch.nn.utils.clip_grad_norm_(model_.parameters(), args.gradientClip)
                 for p in model_.parameters():
                     p.data.add_(-lr, p.grad.data)
+                model_.zero_grad()
+                hidden = util.repackage_hidden(hidden)
 
                 R2 = 1 - R2Numer/R2Denom
                 print 'batch %d/%d | cnt : %d | train MAPE : %r | train R2 : %r'%(batchNum+1,len(trainF), cnt,(mape/cnt).flatten().tolist(), R2.flatten().tolist())
@@ -66,6 +73,10 @@ def train(dataSource,args):
             R2Numer += (target-out)**2
             R2Denom += (target-targetMean)**2
             cnt += 1
+         # perform validation and annealing
+            if (batchNum+1) % args.validEvery == 0:
+                valid_and_anneal(valSource) 
+                model_.train()
             
     except KeyboardInterrupt:
         print 'saving model...'
@@ -106,6 +117,18 @@ def test(dataSource):
         cnt = 0
     return mape.sum()
 
+def valid_and_anneal(dataSource):
+    global minValMape
+    global lr
+    valMape, R2 = test(dataSource)
+    if sum(valMape) < minValMape:
+        minValMape = sum(valMape)
+        print 'writing result and saving model...'
+        util.write_result(valMape, R2,path=args.resultPath)
+        with open(args.save,'wb') as f:
+            torch.save((model_.state_dict(),hidden,args),f)
+    else:
+        lr /= 4.0
 
 # load data
 print 'Preparing data...'
@@ -115,6 +138,7 @@ lucaData = data.Data(config)
 model_ = model.basicLSTM(args)
 model_.to(device)
 hidden = model_.init_hidden(device)
+model_.hidden = hidden
 # optimizer = torch.optim.Adam(list(model_.parameters())+list(hidden),lr=args.learningRate)
 criterion = nn.MSELoss()
 
